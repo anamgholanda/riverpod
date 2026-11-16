@@ -21,11 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    env:
+      # Mantém o PUB_CACHE dentro do workspace para que o container Docker do Sonar enxergue os pacotes
+      PUB_CACHE: ${{ github.workspace }}/.pub-cache
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # histórico completo, necessário para o Sonar
+          fetch-depth: 0 # histórico completo, necessário para o Sonar[cite: 3]
 
       - name: Setup Flutter (inclui Dart)
         id: flutter-setup
@@ -34,20 +38,31 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Verificar FLUTTER_ROOT
+      # Copia/vincula o Flutter SDK para dentro do workspace para ficar visível dentro do container Docker do Sonar
+      - name: Disponibilizar Flutter SDK dentro do workspace para o container Sonar
         run: |
-          echo "FLUTTER_ROOT=$FLUTTER_ROOT"
-          echo "PUB_CACHE=$PUB_CACHE"
+          mkdir -p "$GITHUB_WORKSPACE/.flutter-sdk"
+          cp -a "$FLUTTER_ROOT/." "$GITHUB_WORKSPACE/.flutter-sdk/"
+          echo "FLUTTER_ROOT=$GITHUB_WORKSPACE/.flutter-sdk" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/.flutter-sdk/bin" >> "$GITHUB_PATH"
+          echo "$GITHUB_WORKSPACE/.pub-cache/bin" >> "$GITHUB_PATH"
 
       - name: Ferramenta de cobertura para pacotes Dart
         run: dart pub global activate coverage
 
-      # Resolve as dependências e gera código (build_runner) em cada pacote
+      # Se existir pubspec.yaml na raiz (Dart Pub Workspace), resolve a raiz primeiro;
+      # depois resolve e gera código em cada pacote individual
       - name: Resolver dependências e gerar código dos pacotes
         run: |
           set -uo pipefail
           ok=0; failed=0
           : > "$RUNNER_TEMP/pub_failed.txt"
+
+          if [ -f "pubspec.yaml" ]; then
+            echo "::group::Dependências na raiz (workspace)"
+            flutter pub get || echo "::warning::pub get na raiz falhou"
+            echo "::endgroup::"
+          fi
 
           while IFS= read -r pubspec; do
             pkg="$(dirname "$pubspec")"
@@ -77,23 +92,40 @@ jobs:
             echo "- Pacotes resolvidos: $ok"
             echo "- Pacotes com falha: $failed"
             if [ "$failed" -gt 0 ]; then
-              echo ""; echo "Sem dependências resolvidas (a análise deles terá ruído):"; echo '```'
+              echo ""; echo "Sem dependências resolvidas:"; echo '```'
               cat "$RUNNER_TEMP/pub_failed.txt"; echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Resolvidos: $ok | Falharam: $failed"
 
-      # Unifica os .dart_tool/package_config.json dos subpacotes em packages/ e na raiz para o SonarScanner
+      # Unifica todos os package_config.json (incluindo os pacotes internos do monorepo)
+      # e ajusta os caminhos absolutos do runner para o caminho montado no container Docker (/github/workspace)
       - name: Unificar package_config.json para o SonarScanner
         run: |
           python3 - <<'EOF'
           import json, glob, os
 
+          workspace = os.environ["GITHUB_WORKSPACE"]
+
+          def fix_uri(uri, base_dir):
+              if uri.startswith("file://"):
+                  # Converte /home/runner/work/repo/repo/... para relativo
+                  path = uri.replace("file://", "")
+                  if path.startswith(workspace):
+                      return os.path.relpath(path, base_dir)
+                  return uri
+              return uri
+
           def write_merged(target_dir):
               merged_packages = {}
               dart_tool_dir = os.path.join(target_dir, ".dart_tool") if target_dir != "." else ".dart_tool"
-              for cfg_path in sorted(glob.glob("packages/**/.dart_tool/package_config.json", recursive=True)):
-                  if "/example/" in cfg_path:
+              os.makedirs(dart_tool_dir, exist_ok=True)
+
+              configs = sorted(glob.glob("packages/**/.dart_tool/package_config.json", recursive=True))
+              if os.path.exists(".dart_tool/package_config.json"):
+                  configs.insert(0, ".dart_tool/package_config.json")
+
+              for cfg_path in configs:
+                  if "/example/" in cfg_path or "/integration/" in cfg_path:
                       continue
                   pkg_dir = os.path.dirname(os.path.dirname(cfg_path))
                   with open(cfg_path, "r", encoding="utf-8") as f:
@@ -101,14 +133,23 @@ jobs:
                   for pkg in data.get("packages", []):
                       name = pkg["name"]
                       root_uri = pkg["rootUri"]
-                      if not root_uri.startswith("file://"):
+                      if root_uri.startswith("file://"):
+                          abs_root = root_uri.replace("file://", "")
+                      else:
                           abs_root = os.path.normpath(os.path.join(pkg_dir, ".dart_tool", root_uri))
-                          rel_root = os.path.relpath(abs_root, dart_tool_dir)
-                          pkg["rootUri"] = rel_root
-                      if name not in merged_packages or "pub-cache" in pkg["rootUri"]:
+
+                      # Torna todos os caminhos relativos ao dart_tool_dir (funciona dentro e fora do Docker)
+                      pkg["rootUri"] = os.path.relpath(abs_root, dart_tool_dir)
+
+                      # Prioriza pacotes locais de packages/ quando for pacote do próprio monorepo
+                      local_pkg_path = os.path.abspath(os.path.join("packages", name))
+                      if os.path.isdir(local_pkg_path):
+                          pkg["rootUri"] = os.path.relpath(local_pkg_path, dart_tool_dir)
+                          pkg["packageUri"] = "lib/"
+
+                      if name not in merged_packages or ".pub-cache" in pkg["rootUri"]:
                           merged_packages[name] = pkg
 
-              os.makedirs(dart_tool_dir, exist_ok=True)
               out = {
                   "configVersion": 2,
                   "packages": list(merged_packages.values()),
@@ -125,7 +166,6 @@ jobs:
       - name: Testes com cobertura (todos os pacotes)
         run: |
           set -uo pipefail
-          export PATH="$PATH:$HOME/.pub-cache/bin"
           mkdir -p "$RUNNER_TEMP/cov"
           : > "$RUNNER_TEMP/cov/lcov.info"
 
@@ -146,7 +186,6 @@ jobs:
               fi
             ) || echo "::warning::Falha nos testes de $pkg"
 
-            # Caminhos (SF:) relativos à raiz do repositório
             if [ -f "$pkg/coverage/lcov.info" ]; then
               sed "s|^SF:|SF:${pkg#./}/|" "$pkg/coverage/lcov.info" >> "$RUNNER_TEMP/cov/lcov.info"
             fi
@@ -166,8 +205,8 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          FLUTTER_ROOT: ${{ env.FLUTTER_ROOT }}
-          PUB_CACHE: ${{ env.PUB_CACHE }}
+          FLUTTER_ROOT: /github/workspace/.flutter-sdk
+          PUB_CACHE: /github/workspace/.pub-cache
         with:
           args: >
             -Dsonar.host.url=https://sonarcloud.io
@@ -177,10 +216,10 @@ jobs:
             -Dsonar.sourceEncoding=UTF-8
             -Dsonar.sources=packages
             -Dsonar.inclusions=packages/**/lib/**/*.dart
-            -Dsonar.exclusions=**/example/**,**/*.g.dart,**/*.freezed.dart,**/generated/**,**/build/**,**/ephemeral/**
+            -Dsonar.exclusions=**/example/**,**/integration/**,**/*.g.dart,**/*.freezed.dart,**/generated/**,**/build/**,**/ephemeral/**,**/.flutter-sdk/**,**/.pub-cache/**
             -Dsonar.tests=packages
             -Dsonar.test.inclusions=packages/**/test/**/*.dart
-            -Dsonar.dart.flutter.sdk=${{ env.FLUTTER_ROOT }}
+            -Dsonar.dart.flutter.sdk=/github/workspace/.flutter-sdk
             -Dsonar.dart.lcov.reportPaths=coverage/lcov.info
 
       - name: Quality Gate

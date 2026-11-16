@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # histórico completo, necessário para o Sonar
 
       - name: Setup Flutter (inclui Dart)
         uses: subosito/flutter-action@v2
@@ -33,57 +33,17 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Instalar SonarScanner CLI (nativo no runner)
-        run: |
-          SCANNER_VERSION="6.2.1.4610"
-          curl -sSLo sonar-scanner.zip "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux-x64.zip"
-          unzip -q sonar-scanner.zip -d /opt/sonar-scanner
-          echo "/opt/sonar-scanner/sonar-scanner-${SCANNER_VERSION}-linux-x64/bin" >> "$GITHUB_PATH"
-          rm sonar-scanner.zip
-
       - name: Ferramenta de cobertura para pacotes Dart
         run: dart pub global activate coverage
 
-      # 1. Resolve dependências e gera código em cada pacote
-      - name: Resolver dependências e gerar código dos pacotes
-        run: |
-          set -uo pipefail
-          ok=0; failed=0
-
-          if [ -f "pubspec.yaml" ]; then
-            echo "::group::pub get na raiz (workspace)"
-            flutter pub get || echo "::warning::pub get na raiz falhou"
-            echo "::endgroup::"
-          fi
-
-          while IFS= read -r pubspec; do
-            pkg="$(dirname "$pubspec")"
-            echo "::group::Dependências em $pkg"
-            # Garante que cada subpacote tenha seu próprio .dart_tool/package_config.json
-            if (cd "$pkg" && flutter pub get); then
-              ok=$((ok+1))
-            else
-              failed=$((failed+1))
-              echo "::warning::pub get falhou em $pkg"
-            fi
-
-            if grep -q "build_runner:" "$pubspec"; then
-              (cd "$pkg" && dart run build_runner build --delete-conflicting-outputs) || \
-                echo "::warning::build_runner falhou em $pkg"
-            fi
-            echo "::endgroup::"
-          done < <(find packages -maxdepth 2 -name pubspec.yaml | sort)
-
-          echo "Resolvidos: $ok | Falharam: $failed"
-
-      # 2. Testes com cobertura
       - name: Testes com cobertura (todos os pacotes)
         run: |
           set -uo pipefail
           export PATH="$PATH:$HOME/.pub-cache/bin"
-          mkdir -p "$RUNNER_TEMP/cov"
-          : > "$RUNNER_TEMP/cov/lcov.info"
+          mkdir -p coverage
+          : > coverage/lcov.info
 
+          # Pacotes em packages/, ignorando exemplos e artefatos de build
           while IFS= read -r pubspec; do
             pkg="$(dirname "$pubspec")"
             [ -d "$pkg/test" ] || continue
@@ -92,67 +52,44 @@ jobs:
             (
               cd "$pkg"
               if grep -q "sdk: flutter" pubspec.yaml; then
+                flutter pub get
                 flutter test --coverage
               else
+                dart pub get
                 dart test --coverage=coverage
                 dart pub global run coverage:format_coverage \
                   --lcov --in=coverage --out=coverage/lcov.info \
-                  --report-on=lib
+                  --report-on=lib --packages=.dart_tool/package_config.json
               fi
             ) || echo "::warning::Falha nos testes de $pkg"
 
+            # Caminhos (SF:) relativos à raiz do repositório
             if [ -f "$pkg/coverage/lcov.info" ]; then
-              sed "s|^SF:|SF:${pkg#./}/|" "$pkg/coverage/lcov.info" >> "$RUNNER_TEMP/cov/lcov.info"
+              sed "s|^SF:|SF:${pkg#./}/|" "$pkg/coverage/lcov.info" >> coverage/lcov.info
             fi
             echo "::endgroup::"
-          done < <(find packages -maxdepth 2 -name pubspec.yaml | sort)
+          done < <(find packages -name pubspec.yaml \
+                     -not -path "*/example/*" \
+                     -not -path "*/.dart_tool/*" \
+                     -not -path "*/build/*" | sort)
 
-          mkdir -p coverage
-          cp "$RUNNER_TEMP/cov/lcov.info" coverage/lcov.info
-
-      # 3. Gera sonar-project.properties declarando cada pacote como um módulo independente
-      - name: Configurar módulos do monorepo para o SonarScanner
-        run: |
-          python3 - <<'EOF'
-          import glob, os
-
-          modules = []
-          lines = [
-              "sonar.host.url=https://sonarcloud.io",
-              "sonar.organization=anamgholanda",
-              "sonar.projectKey=anamgholanda_riverpod",
-              "sonar.projectName=riverpod",
-              "sonar.sourceEncoding=UTF-8",
-              f"sonar.dart.flutter.sdk={os.environ['FLUTTER_ROOT']}",
-              "sonar.dart.lcov.reportPaths=coverage/lcov.info",
-              "sonar.exclusions=**/example/**,**/integration/**,**/*.g.dart,**/*.freezed.dart,**/generated/**,**/build/**,**/ephemeral/**",
-          ]
-
-          for pubspec in sorted(glob.glob("packages/*/pubspec.yaml")):
-              pkg_dir = os.path.dirname(pubspec)
-              mod_id = os.path.basename(pkg_dir)
-              if not os.path.isdir(os.path.join(pkg_dir, "lib")):
-                  continue
-              modules.append(mod_id)
-              lines.append(f"{mod_id}.sonar.projectBaseDir={pkg_dir}")
-              lines.append(f"{mod_id}.sonar.sources=lib,pubspec.yaml")
-              if os.path.isdir(os.path.join(pkg_dir, "test")):
-                  lines.append(f"{mod_id}.sonar.tests=test")
-
-          lines.insert(5, f"sonar.modules={','.join(modules)}")
-
-          with open("sonar-project.properties", "w", encoding="utf-8") as f:
-              f.write("\n".join(lines) + "\n")
-
-          print("Módulos configurados:", ", ".join(modules))
-          EOF
-          cat sonar-project.properties
-
-      # 4. Executa o SonarScanner usando o sonar-project.properties gerado
       - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: sonar-scanner
+        with:
+          args: >
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.organization=anamgholanda
+            -Dsonar.projectKey=anamgholanda_riverpod
+            -Dsonar.projectName=riverpod
+            -Dsonar.sourceEncoding=UTF-8
+            -Dsonar.sources=packages
+            -Dsonar.inclusions=packages/**/lib/**/*.dart
+            -Dsonar.exclusions=**/example/**,**/*.g.dart,**/*.freezed.dart,**/generated/**,**/.dart_tool/**
+            -Dsonar.tests=packages
+            -Dsonar.test.inclusions=packages/**/test/**/*.dart
+            -Dsonar.dart.lcov.reportPaths=coverage/lcov.info
 
       - name: Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1

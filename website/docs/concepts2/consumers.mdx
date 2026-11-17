@@ -3,6 +3,13 @@ title: Consumers
 ---
 import { Link } from "/src/components/Link";
 
+<!-- Examples can assume:
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final myProvider = Provider<int>((ref) => 0);
+-->
+
 A "Consumer" is a type of widget that bridges the gap between the Widget tree and the Provider tree.
 
 The only real difference between a Consumer and typical widgets is that Consumers
@@ -102,7 +109,7 @@ Riverpod offers various refactors in IDEs like VSCode and Android Studio.
 
 ![Refactor to Consumer](/img/intro/convert_to_class_provider.gif)
 
-To enable them in your IDE, see <Link documentID="introduction/getting_started" hash="enabling-riverpod_lintcustom_lint" />
+To enable them in your IDE, see <Link documentID="introduction/getting_started" hash="enabling-riverpod_lint" />
 :::
 
 [ref]: https://pub.dev/documentation/hooks_riverpod/latest/hooks_riverpod/Ref-class.html

@@ -8,6 +8,28 @@ import 'package:riverpod/src/internals.dart';
 
 import '../../builders.dart';
 
+// Examples can assume:
+// import 'package:flutter_riverpod/legacy.dart';
+// import 'package:material_ui/material_ui.dart';
+//
+// late WidgetRef ref;
+//
+// class Todo {
+//   Todo(this.id, this.description);
+//   final String id;
+//   final String description;
+//   bool completed = false;
+// }
+//
+// class Counter extends ChangeNotifier {
+//   int count = 0;
+//   void increment() {
+//     count++;
+//     notifyListeners();
+//   }
+// }
+// final changeNotifierProvider = ChangeNotifierProvider((ref) => Counter());
+
 /// {@template riverpod.change_notifier_provider}
 /// Creates a [ChangeNotifier] and exposes its current state.
 ///
@@ -43,13 +65,13 @@ import '../../builders.dart';
 ///
 /// Which you can then pass to a [ChangeNotifierProvider] like so:
 ///
-/// ```dart
-/// final todosProvider = ChangeNotifierProvider<TodosNotifier, List<Todo>>((ref) => TodosNotifier());
+/// ```dart continued
+/// final todosProvider = ChangeNotifierProvider<TodosNotifier>((ref) => TodosNotifier());
 /// ```
 ///
 /// And finally, you can interact with it inside your UI:
 ///
-/// ```dart
+/// ```dart continued
 /// Widget build(BuildContext context, WidgetRef ref) {
 ///   // rebuild the widget when the todo list changes
 ///   List<Todo> todos = ref.watch(todosProvider).todos;
@@ -123,8 +145,9 @@ final class ChangeNotifierProvider<NotifierT extends ChangeNotifier?>
   /// This is typically used to invoke methods on a [ChangeNotifier]. For example:
   ///
   /// ```dart
-  /// Button(
-  ///   onTap: () => ref.read(changeNotifierProvider.notifier).increment(),
+  /// ElevatedButton(
+  ///   onPressed: () => ref.read(changeNotifierProvider.notifier).increment(),
+  ///   child: Text('Increment'),
   /// )
   /// ```
   ///
@@ -219,8 +242,9 @@ class _ChangeNotifierProviderElement<NotifierT extends ChangeNotifier?>
 
   @override
   WhenComplete create(Ref ref) {
-    final notifierResult =
-        _notifierNotifier.result = $Result.guard(() => provider.create(ref));
+    final notifierResult = _notifierNotifier.result = $Result.guard(
+      () => provider.create(ref),
+    );
 
     final notifier = notifierResult.valueOrRawException;
 
@@ -282,28 +306,29 @@ final class ChangeNotifierProviderFamily<
     super.retry,
     bool disposeNotifier = true,
   }) : super(
-         providerFactory: (
-           create, {
-           required $allTransitiveDependencies,
-           required argument,
-           required dependencies,
-           required from,
-           required isAutoDispose,
-           required name,
-           required retry,
-         }) {
-           return ChangeNotifierProvider<NotifierT>.internal(
-             create,
-             disposeNotifier: disposeNotifier,
-             name: name,
-             dependencies: dependencies,
-             $allTransitiveDependencies: $allTransitiveDependencies,
-             isAutoDispose: isAutoDispose,
-             argument: argument,
-             from: from,
-             retry: retry,
-           );
-         },
+         providerFactory:
+             (
+               create, {
+               required $allTransitiveDependencies,
+               required argument,
+               required dependencies,
+               required from,
+               required isAutoDispose,
+               required name,
+               required retry,
+             }) {
+               return ChangeNotifierProvider<NotifierT>.internal(
+                 create,
+                 disposeNotifier: disposeNotifier,
+                 name: name,
+                 dependencies: dependencies,
+                 $allTransitiveDependencies: $allTransitiveDependencies,
+                 isAutoDispose: isAutoDispose,
+                 argument: argument,
+                 from: from,
+                 retry: retry,
+               );
+             },
          $allTransitiveDependencies: computeAllTransitiveDependencies(
            dependencies,
          ),

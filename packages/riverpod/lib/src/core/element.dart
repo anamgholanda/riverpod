@@ -1,5 +1,12 @@
 part of '../framework.dart';
 
+// Examples can assume:
+// import 'package:riverpod/misc.dart';
+//
+// late Ref ref;
+// final provider = FutureProvider<int>((ref) async => 0);
+// final myProvider = FutureProvider<int>((ref) async => 0);
+
 /// {@template riverpod.refreshable}
 /// An interface for provider expressions that can be passed to `ref.refresh`
 ///
@@ -31,8 +38,50 @@ base mixin _ProviderRefreshable<OutT, InT> implements Refreshable<OutT> {
 void Function()? debugCanModifyProviders;
 
 /// A Future-like that support synchronous completion.
-@internal
+@publicInMisc
+@publicInCodegen
 typedef WhenComplete = void Function(void Function() cb)?;
+
+/// Thrown when a [FutureProvider] or [StreamProvider] is disposed before it
+/// has emitted its first value.
+///
+/// This is a normal lifecycle event — it occurs when an `autoDispose` provider
+/// is no longer listened to (e.g. due to navigation) while it is still loading.
+/// It is **not** a programming error.
+///
+/// [ProviderObserver.providerDidFail] will not be called for this exception.
+///
+/// If a downstream provider awaits a disposed provider's [FutureProvider.future],
+/// it will receive this exception. You can catch it to treat disposal as
+/// a no-op rather than an error:
+///
+/// ```dart
+/// final dependentProvider = FutureProvider.autoDispose<String>((ref) async {
+///   try {
+///     final value = await ref.watch(myProvider.future);
+///     return 'Got $value';
+///   } on ProviderDisposedException {
+///     // Upstream disposed before completing — this is expected.
+///     return '';
+///   }
+/// });
+/// ```
+@publicInMisc
+final class ProviderDisposedException implements Exception {
+  /// Creates a [ProviderDisposedException] for [provider].
+  ProviderDisposedException(this.provider);
+
+  /// The provider that was disposed before emitting a value.
+  final ProviderBase<Object?> provider;
+
+  @override
+  String toString() {
+    return 'ProviderDisposedException: The provider $provider was disposed '
+        'during loading state, before it could emit a value.\n'
+        'This is a normal lifecycle event caused by the provider being '
+        'no longer listened to while still loading.';
+  }
+}
 
 /// Mixin to help implement logic for listening to [Future]s/[Stream]s and setup
 /// `provider.future` + convert the object into an [AsyncValue].
@@ -56,6 +105,7 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
   /// - seamless:true => import previous state and skip loading
   /// - seamless:false => import previous state and prefer loading
   bool asyncTransition(AsyncValue<ValueT> newState, {required bool seamless}) {
+    assert(!_disposed, 'Cannot update the state of $origin after its disposal');
     final previous = value;
 
     if (newState._isMultiState) {
@@ -104,10 +154,11 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
   /// has yet to complete.
   @internal
   bool onError(AsyncError<ValueT> value, {bool seamless = false}) {
-    final notified = asyncTransition(value, seamless: seamless);
+    // Once disposed, the error is only sent to `provider.future`.
+    final notified = !_disposed && asyncTransition(value, seamless: seamless);
 
     final result = resultForValue(value);
-    if (result is! $ResultError<StateT> && !origin._isSynthetic) {
+    if (result is! $ResultError<StateT> && !origin._isSynthetic && !_disposed) {
       // Hard error states are already reported to the observers
       for (final observer in container.observers) {
         container.runTernaryGuarded(
@@ -141,7 +192,8 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
   /// has yet to complete.
   @internal
   bool onData(AsyncData<ValueT> value, {bool seamless = false}) {
-    final notified = asyncTransition(value, seamless: seamless);
+    // Once disposed, the value is only sent to `provider.future`.
+    final notified = !_disposed && asyncTransition(value, seamless: seamless);
 
     final completer = _futureCompleter;
     if (completer != null) {
@@ -197,11 +249,8 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
     _cancelSubscription?.resume?.call();
   }
 
-  StateError _missingLastValueError() {
-    return StateError(
-      'The provider $origin was disposed during loading state, '
-      'yet no value could be emitted.',
-    );
+  ProviderDisposedException _missingLastValueError() {
+    return ProviderDisposedException(origin);
   }
 
   /// Listens to a [Future] and convert it into an [AsyncValue].
@@ -270,17 +319,24 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
     })
     listen,
   ) {
-    void callOnError(Object error, StackTrace stackTrace) {
-      onValue(triggerRetry(error, stackTrace), seamless: !ref.isReload);
+    void Function()? onInitialized;
+    var isInitialized = false;
+    // Streams may never close, so their first event completes initialization.
+    void markInitialized() {
+      isInitialized = true;
+      onInitialized?.call();
     }
 
-    void Function()? onDone;
-    var isDone = false;
+    void callOnError(Object error, StackTrace stackTrace) {
+      onValue(triggerRetry(error, stackTrace), seamless: !ref.isReload);
+      markInitialized();
+    }
 
     try {
       _cancelSubscription = listen(
         data: (value) {
           onData(AsyncData(value), seamless: !ref.isReload);
+          markInitialized();
         },
         error: callOnError,
         last: (last) {
@@ -289,8 +345,7 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
         },
         done: () {
           _lastFuture = null;
-          isDone = true;
-          onDone?.call();
+          markInitialized();
         },
       );
     } on AsyncValueIsLoadingException {
@@ -302,10 +357,10 @@ mixin ElementWithFuture<StateT, ValueT> on ProviderElement<StateT, ValueT> {
       callOnError(error, stackTrace);
     }
 
-    return (onDoneCb) {
-      onDone = onDoneCb;
+    return (onInitializedCb) {
+      onInitialized = onInitializedCb;
       // Handle synchronous completion
-      if (isDone) onDoneCb();
+      if (isInitialized) onInitializedCb();
     };
   }
 
@@ -614,12 +669,11 @@ depending on itself.
   /// to dependencies that are no-longer used.
   void _performRebuild() {
     runOnDispose();
-    final ref =
-        this.ref = $Ref(
-          this,
-          isFirstBuild: false,
-          isReload: _didChangeDependency,
-        );
+    final ref = this.ref = $Ref(
+      this,
+      isFirstBuild: false,
+      isReload: _didChangeDependency,
+    );
     final previousValue = value;
 
     if (kDebugMode) _debugDidSetState = false;
@@ -683,25 +737,34 @@ depending on itself.
     $Ref<StateT, ValueT> ref,
   );
 
-  /// A utility for re-initializing a provider when needed.
+  var _isFlushing = false;
+
+  /// Recomputes the state of the provider if necessary.
   ///
-  /// Calling [flush] will only re-initialize the provider if it needs to rerun.
-  /// This can involve:
+  /// This is called when:
+  /// - a provider is read
+  /// - a provider is listened
   /// - a previous call to [Ref.invalidateSelf]
   /// - a dependency of the provider has changed (such as when using [Ref.watch]).
   ///
   /// This is not meant for public consumption. Public API should hide
   /// [flush] from users, such that they don't need to care about invoking this function.
   void flush() {
-    if (!_didMount) {
-      _didMount = true;
-      mount();
-    }
+    final wasFlushing = _isFlushing;
+    _isFlushing = true;
+    try {
+      if (!_didMount) {
+        _didMount = true;
+        mount();
+      }
 
-    _maybeRebuildDependencies();
-    if (_mustRecomputeState) {
-      _mustRecomputeState = false;
-      _performRebuild();
+      _maybeRebuildDependencies();
+      if (_mustRecomputeState) {
+        _mustRecomputeState = false;
+        _performRebuild();
+      }
+    } finally {
+      _isFlushing = wasFlushing;
     }
   }
 
@@ -817,7 +880,16 @@ The provider ${_debugCurrentlyBuildingElement!.origin} modified $origin while bu
 
     runOnDispose();
     mayNeedDispose();
-    container.scheduler.scheduleProviderRefresh(this);
+
+    if (
+    // It is redundant to request for a refresh during flushing as the rebuild
+    // will happen immediately
+    !_isFlushing
+        // Don't schedule refresh for paused providers. Those are paused after-all!
+        &&
+        isActive) {
+      container.scheduler.scheduleProviderRefresh(this);
+    }
 
     // We don't call this._markDependencyMayHaveChanged here because we voluntarily
     // do not want to set the _dependencyMayHaveChanged flag to true.
@@ -889,22 +961,26 @@ The provider ${_debugCurrentlyBuildingElement!.origin} modified $origin while bu
           final listener = listeners[i];
           if (listener.closed) continue;
 
-          container.runBinaryGuarded(
-            listener.providerSub._notifyData,
-            previousState,
-            newState.value,
-          );
+          if (listener.providerSub case final sub?) {
+            container.runBinaryGuarded(
+              sub._notifyData,
+              previousState,
+              newState.value,
+            );
+          }
         }
       case final $ResultError<StateT> newState:
         for (var i = 0; i < listeners.length; i++) {
           final listener = listeners[i];
           if (listener.closed) continue;
 
-          container.runBinaryGuarded(
-            listener.providerSub._notifyError,
-            newState.error,
-            newState.stackTrace,
-          );
+          if (listener.providerSub case final sub?) {
+            container.runBinaryGuarded(
+              sub._notifyError,
+              newState.error,
+              newState.stackTrace,
+            );
+          }
         }
     }
 
@@ -980,9 +1056,17 @@ The provider ${_debugCurrentlyBuildingElement!.origin} modified $origin while bu
 
     _handleFireImmediately(container, sub, fireImmediately: fireImmediately);
 
-    sub.impl._listenedElement.addDependentSubscription(sub.impl);
+    sub.impl._listenedElement?.addDependentSubscription(sub.impl);
+    sub.impl._attachToProviderElement(this);
 
-    if (kDebugMode) ref._debugAssertCanDependOn(listenable);
+    if (kDebugMode) {
+      try {
+        ref._debugAssertCanDependOn(listenable);
+      } catch (_) {
+        sub.close();
+        rethrow;
+      }
+    }
 
     return sub;
   }
@@ -1000,17 +1084,16 @@ The provider ${_debugCurrentlyBuildingElement!.origin} modified $origin while bu
   }
 
   void addDependentSubscription(ProviderSubscriptionImpl<Object?> sub) {
-    assert(
-      !sub.isPaused && sub.impl.active,
-      'Expected subscription to be active and not paused',
-    );
-
     _onChangeSubscription(sub, () {
+      sub._attachedToElement = true;
+
       if (sub.weak) {
         weakDependents.add(sub);
       } else {
         final dependents = this.dependents ??= [];
         dependents.add(sub);
+
+        if (sub.isPaused || !sub.impl.active) pausedActiveSubscriptionCount++;
       }
 
       if (sub.source case ProviderNode(:final element)) {
@@ -1018,6 +1101,17 @@ The provider ${_debugCurrentlyBuildingElement!.origin} modified $origin while bu
         subs.add(sub);
       }
     });
+
+    // The provider was initialized with a paused subscription. As such, we
+    // need to immediately call onCancel to respect life-cycles.
+    if (!sub.weak &&
+        !_didCancelOnce &&
+        !isActive &&
+        (sub.isPaused || !sub.impl.active)) {
+      _didCancelOnce = true;
+      _runCallbacks(container, ref?._onCancelListeners);
+      onCancel();
+    }
   }
 
   void removeDependentSubscription(
@@ -1380,14 +1474,14 @@ $this''',
       for (var i = 0; i < subscriptions.length; i++) {
         final sub = subscriptions[i];
 
-        visitor(sub.impl._listenedElement);
+        if (sub.impl._listenedElement case final element?) visitor(element);
       }
     }
     if (_inactiveSubscriptions case final inactiveSubscriptions?) {
       for (var i = 0; i < inactiveSubscriptions.length; i++) {
         final sub = inactiveSubscriptions[i];
 
-        visitor(sub.impl._listenedElement);
+        if (sub.impl._listenedElement case final element?) visitor(element);
       }
     }
   }

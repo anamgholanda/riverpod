@@ -23,11 +23,11 @@ abstract class TypeChecker {
   /// provided type checkers return true, which is useful for deprecating an
   /// API:
   /// ```dart
-  /// const $Foo = const TypeChecker.fromRuntime(Foo);
-  /// const $Bar = const TypeChecker.fromRuntime(Bar);
+  /// const $Foo = const TypeChecker.fromName('Foo');
+  /// const $Bar = const TypeChecker.fromName('Bar');
   ///
   /// // Used until $Foo is deleted.
-  /// const $FooOrBar = const TypeChecker.forAny(const [$Foo, $Bar]);
+  /// const $FooOrBar = const TypeChecker.any(const [$Foo, $Bar]);
   /// ```
   const factory TypeChecker.any(Iterable<TypeChecker> checkers) = _AnyChecker;
 
@@ -433,15 +433,14 @@ class UnresolvedAnnotationException implements Exception {
 }
 
 /// Returns a URL representing [element].
-String _urlOfElement(Element element) =>
-    element.kind == ElementKind.DYNAMIC
-        ? 'dart:core#dynamic'
-        : element.kind == ElementKind.NEVER
-        ? 'dart:core#Never'
-        // using librarySource.uri – in case the element is in a part
-        : _normalizeUrl(
-          element.library!.uri,
-        ).replace(fragment: element.name).toString();
+String _urlOfElement(Element element) => element.kind == ElementKind.DYNAMIC
+    ? 'dart:core#dynamic'
+    : element.kind == ElementKind.NEVER
+    ? 'dart:core#Never'
+    // using librarySource.uri – in case the element is in a part
+    : _normalizeUrl(
+        element.library!.uri,
+      ).replace(fragment: element.name).toString();
 
 Uri _normalizeUrl(Uri url) {
   switch (url.scheme) {
@@ -462,10 +461,9 @@ Uri _normalizeUrl(Uri url) {
 ///
 /// This isn't a user-knowable path, so we strip out extra path segments
 /// and only expose `dart:core`.
-Uri _normalizeDartUrl(Uri url) =>
-    url.pathSegments.isNotEmpty
-        ? url.replace(pathSegments: url.pathSegments.take(1))
-        : url;
+Uri _normalizeDartUrl(Uri url) => url.pathSegments.isNotEmpty
+    ? url.replace(pathSegments: url.pathSegments.take(1))
+    : url;
 
 Uri _fileToAssetUrl(Uri url) {
   if (!p.isWithin(p.url.current, url.path)) return url;
@@ -481,14 +479,13 @@ Uri _fileToAssetUrl(Uri url) {
 ///
 /// For example, this transforms `package:source_gen/source_gen.dart` into:
 /// `asset:source_gen/lib/source_gen.dart`.
-Uri _packageToAssetUrl(Uri url) =>
-    url.scheme == 'package'
-        ? url.replace(
-          scheme: 'asset',
-          pathSegments: <String>[
-            url.pathSegments.first,
-            'lib',
-            ...url.pathSegments.skip(1),
-          ],
-        )
-        : url;
+Uri _packageToAssetUrl(Uri url) => url.scheme == 'package'
+    ? url.replace(
+        scheme: 'asset',
+        pathSegments: <String>[
+          url.pathSegments.first,
+          'lib',
+          ...url.pathSegments.skip(1),
+        ],
+      )
+    : url;

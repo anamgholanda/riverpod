@@ -1,67 +1,37 @@
 import 'dart:async';
 
-import 'package:devtools_app_shared/ui.dart';
 import 'package:devtools_app_shared/ui.dart' as devtools_shared_ui;
-import 'package:flutter/material.dart';
+import 'package:devtools_app_shared/ui.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-// ignore: implementation_imports
 import 'package:hooks_riverpod/src/internals.dart' as internals;
+import 'package:material_ui/material_ui.dart';
+import 'package:riverpod_devtool_core/riverpod_devtool_core.dart';
 
-import 'elements.dart';
 import 'frames.dart';
-import 'ide.dart';
 import 'object.dart';
 import 'provider_list.dart';
-import 'providers/providers.dart';
 import 'state_inspector/inspector.dart';
 import 'terminal.dart';
+import 'ui_primitives/icon_button.dart';
 import 'ui_primitives/panel.dart';
 import 'ui_primitives/search_bar.dart';
-import 'vm_service.dart';
-
-class InspectorSettings {
-  const InspectorSettings({this.showExternalPrivateMembers = false});
-
-  final bool showExternalPrivateMembers;
-
-  InspectorSettings copyWith({bool? showExternalPrivateMembers}) {
-    return InspectorSettings(
-      showExternalPrivateMembers:
-          showExternalPrivateMembers ?? this.showExternalPrivateMembers,
-    );
-  }
-}
-
-final inspectorSettingsProvider =
-    NotifierProvider<InspectorSettingsNotifier, InspectorSettings>(
-      InspectorSettingsNotifier.new,
-    );
-
-class InspectorSettingsNotifier extends Notifier<InspectorSettings> {
-  @override
-  InspectorSettings build() => const InspectorSettings();
-
-  void setShowExternalPrivateMembers({required bool value}) {
-    state = state.copyWith(showExternalPrivateMembers: value);
-  }
-}
 
 class InspectorSettingsButton extends StatelessWidget {
   const InspectorSettingsButton({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
+    return DevtoolIconButton(
       onPressed: () => showDialog<void>(
         context: context,
+        // DevTools wraps the devtool in the Material app of the SDK. Its root
+        // navigator has neither our theme nor our localizations.
+        useRootNavigator: false,
         builder: (context) => const _InspectorSettingsDialog(),
       ),
       tooltip: 'Inspector settings',
       icon: const Icon(Icons.settings),
-      iconSize: 18,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
     );
   }
 }
@@ -165,6 +135,8 @@ class _FrameViewer extends HookConsumerWidget {
       filteredProvidersForCurrentFrameProvider(search.text),
     );
     final selected = ref.watch(selectedProviderProvider(search.text));
+    final selectedFrame = ref.watch(selectedFrameProvider);
+    final frames = ref.watch(filteredFramesProvider).value;
     final selectedNotifier = ref.watch(
       selectedProviderIdProvider(search.text).notifier,
     );
@@ -192,7 +164,12 @@ class _FrameViewer extends HookConsumerWidget {
         ),
 
         if (selected case final selected?)
-          ProviderViewer(element: selected.element)
+          ProviderViewer(
+            element: selected.element,
+            isCurrent:
+                selectedFrame?.id == frames?.lastOrNull?.id &&
+                selected.status != ProviderStatusInFrame.disposed,
+          )
         else
           const Panel(child: Text('No provider selected')),
       ],
@@ -204,12 +181,66 @@ extension DevtoolTheme on ThemeData {
   Color get panelBorderColor => focusColor;
 }
 
+class InvalidateProviderButton extends ConsumerWidget {
+  const InvalidateProviderButton({
+    super.key,
+    required this.element,
+    this.enabled = true,
+  });
+
+  /// The live ProviderElement backing the provider to invalidate.
+  final ElementMeta element;
+
+  /// Whether [element] can be invalidated. A provider cannot when it is
+  /// disposed, or shown as it was in a past frame.
+  final bool enabled;
+
+  Future<void> _invalidate(WidgetRef ref) async {
+    final isAlive = Disposable();
+
+    String? errorMessage;
+    try {
+      final evalFactory = await ref.read(evalProvider.future);
+      await element.invalidate(evalFactory, isAlive: isAlive);
+    } catch (error) {
+      errorMessage = error.toString();
+    } finally {
+      isAlive.dispose();
+    }
+
+    if (errorMessage != null && ref.context.mounted) {
+      ScaffoldMessenger.of(ref.context).showSnackBar(
+        SnackBar(content: Text('Failed to invalidate: $errorMessage')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return DevtoolIconButton(
+      onPressed: enabled ? () => _invalidate(ref) : null,
+      tooltip: enabled
+          ? 'Invalidate provider'
+          : 'Only the current state of a provider can be invalidated',
+      icon: const Icon(Icons.refresh),
+    );
+  }
+}
+
 const dividerHeight = 16.0;
 
 class ProviderViewer extends StatelessWidget {
-  const ProviderViewer({super.key, required this.element});
+  const ProviderViewer({
+    super.key,
+    required this.element,
+    required this.isCurrent,
+  });
 
   final ElementMeta element;
+
+  /// Whether [element] is the provider as it currently is in the application,
+  /// as opposed to a past frame or a disposed provider.
+  final bool isCurrent;
 
   @override
   Widget build(BuildContext context) {
@@ -223,13 +254,21 @@ class ProviderViewer extends StatelessWidget {
         child: Column(
           spacing: denseRowSpacing,
           children: [
-            const devtools_shared_ui.AreaPaneHeader(
+            devtools_shared_ui.AreaPaneHeader(
               roundedTopBorder: false,
               includeTopBorder: false,
-              title: Text('State'),
-              actions: [InspectorSettingsButton()],
+              title: const Text('State'),
+              actions: [
+                InvalidateProviderButton(element: element, enabled: isCurrent),
+                const InspectorSettingsButton(),
+              ],
             ),
-            Expanded(child: Inspector(object: element.state.state)),
+            Expanded(
+              child: Inspector(
+                key: ValueKey(element.provider.elementId),
+                object: element.state.state,
+              ),
+            ),
           ],
         ),
       ),
@@ -239,17 +278,21 @@ class ProviderViewer extends StatelessWidget {
       return (
         minSize: stateMinSize,
         fraction: .2,
-        heading: const PreferredSize(
-          preferredSize: Size(0, 28),
+        heading: PreferredSize(
+          preferredSize: const Size(0, 28),
           child: devtools_shared_ui.AreaPaneHeader(
             roundedTopBorder: false,
-            title: Text('Notifier'),
+            // Frames record states, but notifiers are live objects.
+            title: Text(isCurrent ? 'Notifier' : 'Notifier (as it is now)'),
           ),
         ),
         content: Material(
           child: Padding(
             padding: const .symmetric(vertical: 8),
-            child: Inspector(object: notifier.state),
+            child: Inspector(
+              key: ValueKey(element.provider.elementId),
+              object: notifier.state,
+            ),
           ),
         ),
       );
@@ -275,7 +318,7 @@ class ProviderViewer extends StatelessWidget {
 
     return Panel(
       child: SplitPane(
-        // TODO remove key, Blocked by: https://github.com/flutter/devtools/issues/9648
+        // TODO remove key once devtools_app_shared 0.5.2 is released, with the fix of https://github.com/flutter/devtools/pull/9822
         key: ValueKey(notifier != null),
         axis: .vertical,
         initialFractions: [
@@ -328,6 +371,7 @@ class _ProviderPickerPanel extends HookConsumerWidget {
             Expanded(
               child: ProviderList(
                 originStates: originStates,
+                showChanges: ref.watch(timeTravelProvider).value ?? false,
                 onSelected: onSelected,
                 selectedId: selectedId,
               ),

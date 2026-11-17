@@ -1,16 +1,29 @@
+// ignore_for_file: deprecated_member_use_from_same_package
+
 part of '../framework.dart';
+
+// Examples can assume:
+// // The examples are about the deprecated API that this file declares.
+// // ignore_for_file: deprecated_member_use
+// import 'package:riverpod/misc.dart';
 
 /// An object containing metadata about the listened object of a
 /// [ProviderTransformer].
+@Deprecated(
+  'Use CustomProviderListenable/ProviderTransformer2 instead. '
+  'This will be removed in a future version.',
+)
 @publicInMisc
 final class ProviderTransformerContext<InT, OutT> {
-  ProviderTransformerContext._({required AsyncResult<InT> sourceState})
-    : _sourceState = sourceState;
-
-  AsyncResult<InT> _sourceState;
+  @Deprecated(
+    'Use CustomProviderListenable/ProviderTransformer2 instead. '
+    'This will be removed in a future version.',
+  )
+  ProviderTransformerContext._({required this._sourceState});
 
   /// The current state of [SyncProviderTransformerMixin.source].
   AsyncResult<InT> get sourceState => _sourceState;
+  AsyncResult<InT> _sourceState;
 }
 
 /// {@template provider_transformer}
@@ -22,9 +35,17 @@ final class ProviderTransformerContext<InT, OutT> {
 /// - a description of how to react to various life-cycles
 ///   related to the listened object.
 /// {@endtemplate}
+@Deprecated(
+  'Use CustomProviderListenable/ProviderTransformer2 instead. '
+  'This will be removed in a future version.',
+)
 @publicInMisc
 class ProviderTransformer<InT, ValueT> {
   /// {@macro provider_transformer}
+  @Deprecated(
+    'Use CustomProviderListenable/ProviderTransformer2 instead. '
+    'This will be removed in a future version.',
+  )
   ProviderTransformer({
     required this.listener,
     required ValueT Function(ProviderTransformer<InT, ValueT> self) initState,
@@ -163,15 +184,14 @@ extension<InT, StateT, ValueT>
           source.container.runGuarded(onClose);
         }
       },
-      read:
-          () => read(switch (upsertTransformer()) {
-            AsyncData() && final transformer => transformer.value.state,
-            // Maps transformer errors as state errors
-            AsyncError(:final error, :final stackTrace) => AsyncError(
-              error,
-              stackTrace,
-            ),
-          }),
+      read: () => read(switch (upsertTransformer()) {
+        AsyncData() && final transformer => transformer.value.state,
+        // Maps transformer errors as state errors
+        AsyncError(:final error, :final stackTrace) => AsyncError(
+          error,
+          stackTrace,
+        ),
+      }),
     );
 
     // 'weak' is lazy loaded, but weak:false isn't.
@@ -225,7 +245,7 @@ abstract class _ProviderTransformerMixin<InT, StateT, ValueT>
 ///      return ProviderTransformer(
 ///        initState: (_) => context.sourceState.requireValue,
 ///        listener: (self, previous, next) {
-///          if (where(previous, next))
+///          if (where(previous.requireValue, next.requireValue))
 ///            self.state = next;
 ///        },
 ///      );
@@ -243,6 +263,10 @@ abstract class _ProviderTransformerMixin<InT, StateT, ValueT>
 ///
 /// See also:
 /// - [ProviderTransformer], the object responsible for the transformation logic.
+@Deprecated(
+  'Use CustomProviderListenable/SyncProviderTransformer2 instead. '
+  'This will be removed in a future version.',
+)
 @publicInMisc
 base mixin SyncProviderTransformerMixin<InT, ValueT>
     implements _ProviderTransformerMixin<InT, ValueT, ValueT> {

@@ -1,5 +1,28 @@
 part of '../framework.dart';
 
+// Examples can assume:
+// import 'package:dio/dio.dart';
+// import 'package:flutter_riverpod/flutter_riverpod.dart'
+//     show ConsumerWidget, WidgetRef;
+// import 'package:material_ui/material_ui.dart';
+//
+// class User {
+//   String get name => '';
+// }
+//
+// class MyData {
+//   MyData();
+//   factory MyData.fromJson(Object? json) => MyData();
+// }
+//
+// final dio = Dio();
+// late Ref ref;
+// late Object error;
+// Future<void> something() async {}
+// final provider = FutureProvider<int>((ref) async => 0);
+// final someProvider = FutureProvider<int>((ref) async => 0);
+// final anotherProvider = FutureProvider<int>((ref) async => 0);
+
 @internal
 extension AsyncTransition<ValueT> on AsyncValue<ValueT> {
   AsyncValue<NewT> cast<NewT>() => _cast<NewT>();
@@ -104,9 +127,16 @@ extension AsyncValueExtensions<ValueT> on AsyncValue<ValueT> {
   /// Notifiers can set this manually as such:
   ///
   /// ```dart
-  /// state = AsyncLoading(progress: 0);
-  /// await something();
-  /// ref.state = AsyncLoading(progress: 1);
+  /// class MyNotifier extends AsyncNotifier<MyData> {
+  ///   @override
+  ///   Future<MyData> build() async {
+  ///     state = AsyncLoading(progress: 0);
+  ///     await something();
+  ///     state = AsyncLoading(progress: 1);
+  ///
+  ///     return MyData();
+  ///   }
+  /// }
   /// ```
   num? get progress => _loading?.progress;
 
@@ -351,18 +381,29 @@ typedef _DataRecord<ValueT> = (ValueT, {DataKind? kind, DataSource? source});
 
 /// Not public
 @internal
-typedef DataFilledRecord<ValueT> =
-    ({ValueT value, DataKind kind, DataSource? source});
+typedef DataFilledRecord<ValueT> = ({
+  ValueT value,
+  DataKind kind,
+  DataSource? source,
+});
 typedef _ErrorRecord = ({Object err, StackTrace stack, bool? retrying});
-typedef _ErrorFilledRecord =
-    ({Object error, StackTrace stackTrace, bool retrying});
+typedef _ErrorFilledRecord = ({
+  Object error,
+  StackTrace stackTrace,
+  bool retrying,
+});
 typedef _LoadingRecord = ({num? progress});
 
 /// [AsyncValue.requireValue] was called on an [AsyncValue] with no error nor a value.
 ///
 /// {@macro chaining_providers_synchronously}
 class AsyncValueIsLoadingException implements Exception {
-  AsyncValueIsLoadingException._(this.value);
+  /// Creates the exception thrown by [AsyncValue.requireValue] when [value]
+  /// is loading.
+  ///
+  /// This is useful to reproduce the behavior of [AsyncValue.requireValue],
+  /// such as when mocking a provider.
+  AsyncValueIsLoadingException(this.value);
 
   /// The [AsyncValue] that was in loading state when [AsyncValue.requireValue] was called.
   final AsyncValue<Object?> value;
@@ -395,9 +436,9 @@ class AsyncValueIsLoadingException implements Exception {
 ///
 ///     return switch (user) {
 ///       AsyncValue(hasError: true) => Text('Oops, something unexpected happened'),
-///       AsyncValue(:final value, hasValue: true) => Text('Hello ${value.name}'),
+///       AsyncValue(:final value?) => Text('Hello ${value.name}'),
 ///       _ => CircularProgressIndicator(),
-///     );
+///     };
 ///   }
 /// }
 /// ```
@@ -405,12 +446,12 @@ class AsyncValueIsLoadingException implements Exception {
 /// If a consumer of an [AsyncValue] does not care about the loading/error
 /// state, consider using [requireValue] to read the state:
 ///
-/// ```dart
+/// ```dart continued
 /// Widget build(BuildContext context, WidgetRef ref) {
 ///   // Reading .requireValue will be thrown both on loading and error states.
 ///   final User user = ref.watch(userProvider).requireValue;
 ///
-///   ...
+///   return Text('Hello ${user.name}');
 /// }
 /// ```
 ///
@@ -477,7 +518,7 @@ sealed class AsyncValue<ValueT> {
   ///     state = const AsyncValue.loading();
   ///     try {
   ///       final response = await dio.get('my_api/data');
-  ///       final data = MyData.fromJson(response);
+  ///       final data = MyData.fromJson(response.data);
   ///       state = AsyncValue.data(data);
   ///     } catch (err, stack) {
   ///       state = AsyncValue.error(err, stack);
@@ -498,7 +539,7 @@ sealed class AsyncValue<ValueT> {
   ///     // does the try/catch for us like previously
   ///     state = await AsyncValue.guard(() async {
   ///       final response = await dio.get('my_api/data');
-  ///       return Data.fromJson(response);
+  ///       return MyData.fromJson(response.data);
   ///     });
   ///   }
   /// }
@@ -513,7 +554,6 @@ sealed class AsyncValue<ValueT> {
   ///     // Catch all errors beside [FormatException]s.
   ///    (err) => err is! FormatException,
   ///   );
-  /// }
   /// ```
   static Future<AsyncValue<ValueT>> guard<ValueT>(
     Future<ValueT> Function() future, [
@@ -575,7 +615,7 @@ sealed class AsyncValue<ValueT> {
   /// ```dart
   /// // We use FutureProvider + AsyncValue to sycnhronously combine asynchronous providers.
   /// // Notice how the callback of FutureProvider is not marked as async.
-  /// final sumProvider = FutureProvider<User>((ref) {
+  /// final sumProvider = FutureProvider<int>((ref) {
   ///   AsyncValue<int> value = ref.watch(someProvider);
   ///   AsyncValue<int> anotherValue = ref.watch(anotherProvider);
   ///
@@ -594,7 +634,7 @@ sealed class AsyncValue<ValueT> {
     }
 
     assert(this is! AsyncData, 'Bad state');
-    throw AsyncValueIsLoadingException._(this);
+    throw AsyncValueIsLoadingException(this);
   }
 
   /// The [error].
@@ -688,13 +728,8 @@ final class AsyncData<ValueT> extends AsyncResult<ValueT> {
     @internal DataKind? kind,
   }) : this._((value, kind: kind, source: null), loading: null, error: null);
 
-  const AsyncData._(
-    this._value, {
-    required _ErrorRecord? error,
-    required _LoadingRecord? loading,
-  }) : _loading = loading,
-       _error = error,
-       super._();
+  const AsyncData._(this._value, {required this._error, required this._loading})
+    : super._();
 
   @override
   final _LoadingRecord? _loading;
@@ -747,11 +782,9 @@ final class AsyncLoading<ValueT> extends AsyncValue<ValueT> {
 
   const AsyncLoading._(
     this._loading, {
-    required _DataRecord<ValueT>? value,
-    required _ErrorRecord? error,
-  }) : _value = value,
-       _error = error,
-       super._();
+    required this._value,
+    required this._error,
+  }) : super._();
 
   @override
   final _LoadingRecord _loading;
@@ -781,25 +814,22 @@ final class AsyncLoading<ValueT> extends AsyncValue<ValueT> {
     AsyncValue<ValueT> previous, {
     bool isRefresh = true,
   }) {
-    final previousValue =
-        isRefresh
-            ? previous._value
-            : previous._value?.copyWith(source: (DataSource.reload,));
+    final previousValue = isRefresh
+        ? previous._value
+        : previous._value?.copyWith(source: (DataSource.reload,));
 
     if (isRefresh) {
       return previous.map(
-        data:
-            (previous) => AsyncData._(
-              previousValue!,
-              error: previous._error,
-              loading: _loading,
-            ),
-        error:
-            (previous) => AsyncError._(
-              previous._error,
-              loading: _loading,
-              value: previousValue,
-            ),
+        data: (previous) => AsyncData._(
+          previousValue!,
+          error: previous._error,
+          loading: _loading,
+        ),
+        error: (previous) => AsyncError._(
+          previous._error,
+          loading: _loading,
+          value: previousValue,
+        ),
         loading: (_) {
           return AsyncLoading<ValueT>._(
             _loading,
@@ -835,11 +865,9 @@ final class AsyncError<ValueT> extends AsyncResult<ValueT> {
 
   const AsyncError._(
     this._error, {
-    required _DataRecord<ValueT>? value,
-    required _LoadingRecord? loading,
-  }) : _value = value,
-       _loading = loading,
-       super._();
+    required this._value,
+    required this._loading,
+  }) : super._();
 
   @override
   final _LoadingRecord? _loading;

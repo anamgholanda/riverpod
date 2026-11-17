@@ -1,4 +1,61 @@
+## 4.0.10 - 2026-11-06
+
+- Allow `build` 5, as required by `build_runner` 2.17.1. (thanks to @uveshm003)
+- `mockito` is now a dev dependency, as only the tests of `riverpod_generator` use it. (thanks to @uveshm003)
+- Generated code now uses the import prefix of `riverpod_annotation` (`import ... as r`) for every Riverpod type it references, instead of only for the types of user code.
+- Providers whose return type is unresolved now fail generation with an
+  "Invalid provider type" error pointing at the provider, instead of an
+  `InvalidTypeException` stack trace.
+
+### Dependency changes
+
+- `riverpod_analyzer_utils` upgraded to `1.0.0`
+- `riverpod_annotation` upgraded to `4.0.8`
+
+## 4.0.9 - 2026-09-04
+
+- Upgraded `analyzer` to `<15.0.0`
+
+### Dependency changes
+
+- `riverpod_analyzer_utils` upgraded to `1.0.0-dev.12`
+- `riverpod_annotation` upgraded to `4.0.7`
+
+## 4.0.8 - 2026-07-28
+
+### Dependency changes
+
+- `riverpod_annotation` upgraded to `4.0.6`
+
+## 4.0.7 - 2026-07-27
+
+### Dependency changes
+
+- `riverpod_analyzer_utils` upgraded to `1.0.0-dev.11`
+
+## 4.0.6 - 2026-07-26
+
+### Dependency changes
+
+- `riverpod_annotation` upgraded to `4.0.5`
+
+## 4.0.5 - 2026-07-26
+
+### Dependency changes
+
+- `riverpod_annotation` upgraded to `4.0.4`
+
+## 4.0.4 - 2026-06-10
+
+- Fix `AsyncNotifierProvider`/`StreamNotifierProvider` disposing dependencies
+  watched after an asynchronous gap during rebuild. (thanks to @a1573595)
+
+### Dependency changes
+
+- `riverpod_annotation` upgraded to `4.0.3`
+
 ## 4.0.4-dev.3 - 2026-05-06
+
 ### Dependency changes
 
 - `riverpod_annotation` upgraded to `4.0.3-dev.2`

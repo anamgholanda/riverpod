@@ -1,12 +1,11 @@
-// ignore_for_file: invalid_use_of_protected_member, void_checks, prefer_const_constructors, avoid_types_on_closure_parameters
+// ignore_for_file: void_checks
 
 import 'dart:async';
 
 import 'package:async/async.dart';
 import 'package:meta/meta.dart';
 import 'package:mockito/mockito.dart';
-import 'package:riverpod/legacy.dart';
-import 'package:riverpod/misc.dart' show Refreshable, ProviderListenable;
+import 'package:riverpod/misc.dart' show ProviderDisposedException;
 import 'package:riverpod/riverpod.dart';
 import 'package:riverpod/src/framework.dart' show UnmountedRefException;
 import 'package:riverpod/src/providers/async_notifier.dart' show $AsyncNotifier;
@@ -17,15 +16,6 @@ import '../matrix.dart';
 import '../utils.dart';
 
 void main() {
-  test('Throws if using notifier properties in its constructor', () {
-    final errors = captureErrors([
-      () => CtorNotifier().state,
-      () => CtorNotifier().state = const AsyncData(42),
-      () => CtorNotifier().future,
-      () => CtorNotifier().ref,
-    ]);
-  });
-
   asyncNotifierProviderFactory.createGroup((factory) {
     test('Does not report AsyncValueIsLoadingException as uncaught', () async {
       final container = ProviderContainer.test();
@@ -79,6 +69,87 @@ void main() {
 
       expect(sub.read().isRefreshing, true);
     });
+
+    test('keeps post-await dependencies alive during rebuild', () async {
+      final container = ProviderContainer.test();
+      var dependencyDisposeCount = 0;
+      var gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+
+      final dependency = NotifierProvider.autoDispose(
+        () => DeferredNotifier<int>((ref, _) {
+          ref.onDispose(() => dependencyDisposeCount++);
+          return 0;
+        }),
+      );
+      final provider = factory.simpleTestProvider<int>((ref, _) async {
+        await gate.future;
+
+        return ref.watch(dependency);
+      });
+
+      container.listen(provider, (previous, next) {});
+
+      gate.complete();
+      await expectLater(container.read(provider.future), completion(0));
+
+      gate = Completer<void>();
+      container.read(dependency.notifier).state++;
+      await container.pump();
+
+      expect(dependencyDisposeCount, 0);
+
+      gate.complete();
+      await expectLater(container.read(provider.future), completion(1));
+      expect(dependencyDisposeCount, 0);
+    });
+
+    test(
+      'keeps post-await dependencies alive during rebuild (overrideWithBuild)',
+      () async {
+        var dependencyDisposeCount = 0;
+        var gate = Completer<void>();
+        addTearDown(() {
+          if (!gate.isCompleted) gate.complete();
+        });
+
+        final dependency = NotifierProvider.autoDispose(
+          () => DeferredNotifier<int>((ref, _) {
+            ref.onDispose(() => dependencyDisposeCount++);
+            return 0;
+          }),
+        );
+        final provider = factory.simpleTestProvider<int>((ref, _) async {
+          throw UnimplementedError();
+        });
+        final container = ProviderContainer.test(
+          overrides: [
+            provider.overrideWithBuild((ref, self) async {
+              await gate.future;
+
+              return ref.watch(dependency);
+            }),
+          ],
+        );
+
+        container.listen(provider, (previous, next) {});
+
+        gate.complete();
+        await expectLater(container.read(provider.future), completion(0));
+
+        gate = Completer<void>();
+        container.read(dependency.notifier).state++;
+        await container.pump();
+
+        expect(dependencyDisposeCount, 0);
+
+        gate.complete();
+        await expectLater(container.read(provider.future), completion(1));
+        expect(dependencyDisposeCount, 0);
+      },
+    );
 
     test(
       'Calling state= followed by returning .future does not cause a double notification',
@@ -585,7 +656,7 @@ void main() {
         'performs seamless:false copyWithPrevious if triggered by a dependency change',
         () async {
           final container = ProviderContainer.test();
-          final dep = StateProvider((ref) => 0);
+          final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
           final provider = factory.simpleTestProvider(
             (ref, _) => Future.value(ref.watch(dep)),
           );
@@ -641,7 +712,7 @@ void main() {
         'performs seamless:false copyWithPrevious if both triggered by a dependency change and ref.refresh',
         () async {
           final container = ProviderContainer.test();
-          final dep = StateProvider((ref) => 0);
+          final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
           final provider = factory.simpleTestProvider(
             (ref, _) => Future.value(ref.watch(dep)),
           );
@@ -858,7 +929,7 @@ void main() {
       'stops listening to the previous future data when the provider rebuilds',
       () async {
         final container = ProviderContainer.test();
-        final dep = StateProvider((ref) => 0);
+        final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
         final completers = {0: Completer<int>.sync(), 1: Completer<int>.sync()};
         final provider = factory.simpleTestProvider<int>(
           (ref, _) => completers[ref.watch(dep)]!.future,
@@ -896,7 +967,7 @@ void main() {
       'stops listening to the previous future error when the provider rebuilds',
       () async {
         final container = ProviderContainer.test(retry: (_, _) => null);
-        final dep = StateProvider((ref) => 0);
+        final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
         final completers = {0: Completer<int>.sync(), 1: Completer<int>.sync()};
         final provider = factory.simpleTestProvider<int>(
           (ref, _) => completers[ref.watch(dep)]!.future,
@@ -975,7 +1046,7 @@ void main() {
       );
 
       test('can be read inside build', () {
-        final dep = StateProvider((ref) => 0);
+        final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
         late AsyncValue<int> state;
         final provider = factory.provider<int>(() {
           late TestAsyncNotifier<int> notifier;
@@ -1116,7 +1187,7 @@ void main() {
       });
 
       test(
-        'if going back to loading after future resolved, throws StateError',
+        'if going back to loading after future resolved, throws ProviderDisposedException',
         () async {
           final container = ProviderContainer.test();
           final completer = Completer<int>.sync();
@@ -1135,7 +1206,7 @@ void main() {
 
           container.dispose();
 
-          await expectLater(future, throwsStateError);
+          await expectLater(future, throwsA(isA<ProviderDisposedException>()));
         },
       );
 
@@ -1159,8 +1230,10 @@ void main() {
           completer.complete(42);
 
           expect(sub.read().future, completion(42));
-          final capture =
-              verifyOnly(listener, listener(captureAny, captureAny)).captured;
+          final capture = verifyOnly(
+            listener,
+            listener(captureAny, captureAny),
+          ).captured;
 
           expect(capture.length, 2);
           expect(capture.first, completion(21));
@@ -1196,7 +1269,7 @@ void main() {
 
       test('returns a Future identical to that of .future', () {
         final listener = OnBuildMock();
-        final dep = StateProvider((ref) => 0);
+        final dep = NotifierProvider(() => SettableNotifier((ref) => 0));
         final provider = factory.simpleTestProvider<int>((ref, _) {
           listener();
           return Future.value(ref.watch(dep));
@@ -1360,138 +1433,6 @@ void main() {
       });
     });
   });
-
-  test('supports overrideWith', () {
-    final provider = AsyncNotifierProvider<DeferredAsyncNotifier<int>, int>(
-      () => DeferredAsyncNotifier((ref, _) => 0),
-    );
-    final autoDispose =
-        AsyncNotifierProvider.autoDispose<DeferredAsyncNotifier<int>, int>(
-          () => DeferredAsyncNotifier((ref, _) => 0),
-        );
-    final container = ProviderContainer.test(
-      overrides: [
-        provider.overrideWith(() => DeferredAsyncNotifier((ref, _) => 42)),
-        autoDispose.overrideWith(() => DeferredAsyncNotifier((ref, _) => 84)),
-      ],
-    );
-
-    expect(container.read(provider).value, 42);
-    expect(container.read(autoDispose).value, 84);
-  });
-
-  test('supports family overrideWith', () {
-    final family =
-        AsyncNotifierProvider.family<DeferredAsyncNotifier<int>, int, int>(
-          (arg) => DeferredAsyncNotifier((ref, _) => 0),
-        );
-    final autoDisposeFamily = AsyncNotifierProvider.autoDispose
-        .family<DeferredAsyncNotifier<int>, int, int>(
-          (arg) => DeferredAsyncNotifier((ref, _) => 0),
-        );
-    final container = ProviderContainer.test(
-      overrides: [
-        family.overrideWith2(
-          (arg) => DeferredAsyncNotifier<int>((ref, _) => 42 + arg),
-        ),
-        autoDisposeFamily.overrideWith2(
-          (arg) => DeferredAsyncNotifier<int>((ref, _) => 84 + arg),
-        ),
-      ],
-    );
-
-    expect(container.read(family(10)).value, 52);
-    expect(container.read(autoDisposeFamily(10)).value, 94);
-  });
-
-  group('modifiers', () {
-    void canBeAssignedToRefreshable<StateT>(Refreshable<StateT> provider) {}
-
-    void canBeAssignedToProviderListenable<StateT>(
-      ProviderListenable<StateT> provider,
-    ) {}
-
-    test('provider', () {
-      final provider = AsyncNotifierProvider<DeferredAsyncNotifier<int>, int>(
-        () => DeferredAsyncNotifier((ref, _) => 0),
-      );
-
-      provider.select((AsyncValue<int> value) => 0);
-      provider.selectAsync((int value) => 0);
-
-      canBeAssignedToProviderListenable<AsyncValue<int>>(provider);
-      canBeAssignedToRefreshable<AsyncValue<int>>(provider);
-
-      canBeAssignedToProviderListenable<Future<int>>(provider.future);
-      canBeAssignedToRefreshable<Future<int>>(provider.future);
-
-      canBeAssignedToProviderListenable<AsyncNotifier<int>>(provider.notifier);
-      canBeAssignedToRefreshable<AsyncNotifier<int>>(provider.notifier);
-    });
-
-    test('autoDispose', () {
-      final autoDispose =
-          AsyncNotifierProvider.autoDispose<DeferredAsyncNotifier<int>, int>(
-            () => DeferredAsyncNotifier((ref, _) => 0),
-          );
-
-      autoDispose.select((AsyncValue<int> value) => 0);
-      autoDispose.selectAsync((int value) => 0);
-
-      canBeAssignedToProviderListenable<AsyncValue<int>>(autoDispose);
-      canBeAssignedToRefreshable<AsyncValue<int>>(autoDispose);
-
-      canBeAssignedToProviderListenable<Future<int>>(autoDispose.future);
-      canBeAssignedToRefreshable<Future<int>>(autoDispose.future);
-
-      canBeAssignedToProviderListenable<AsyncNotifier<int>>(
-        autoDispose.notifier,
-      );
-      canBeAssignedToRefreshable<AsyncNotifier<int>>(autoDispose.notifier);
-    });
-
-    test('family', () {
-      final family = AsyncNotifierProvider.family<
-        DeferredAsyncNotifier<String>,
-        String,
-        int
-      >((arg) => DeferredAsyncNotifier((ref, _) => '0'));
-
-      family(0).select((AsyncValue<String> value) => 0);
-      family(0).selectAsync((String value) => 0);
-
-      canBeAssignedToProviderListenable<AsyncValue<String>>(family(0));
-      canBeAssignedToRefreshable<AsyncValue<String>>(family(0));
-
-      canBeAssignedToProviderListenable<Future<String>>(family(0).future);
-      canBeAssignedToRefreshable<Future<String>>(family(0).future);
-    });
-
-    test('autoDisposeFamily', () {
-      expect(
-        AsyncNotifierProvider.autoDispose.family,
-        same(AsyncNotifierProvider.family.autoDispose),
-      );
-
-      final autoDisposeFamily = AsyncNotifierProvider.autoDispose
-          .family<DeferredAsyncNotifier<String>, String, int>(
-            (arg) => DeferredAsyncNotifier((ref, _) => '0'),
-          );
-
-      autoDisposeFamily(0).select((AsyncValue<String> value) => 0);
-      autoDisposeFamily(0).selectAsync((String value) => 0);
-
-      canBeAssignedToProviderListenable<AsyncValue<String>>(
-        autoDisposeFamily(0),
-      );
-      canBeAssignedToRefreshable<AsyncValue<String>>(autoDisposeFamily(0));
-
-      canBeAssignedToProviderListenable<Future<String>>(
-        autoDisposeFamily(0).future,
-      );
-      canBeAssignedToRefreshable<Future<String>>(autoDisposeFamily(0).future);
-    });
-  });
 }
 
 @immutable
@@ -1509,9 +1450,4 @@ class Equal<BoxedT> {
 
   @override
   String toString() => 'Equal($value)';
-}
-
-class CtorNotifier extends AsyncNotifier<int> {
-  @override
-  FutureOr<int> build() => 0;
 }

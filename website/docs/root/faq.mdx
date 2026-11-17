@@ -6,6 +6,31 @@ version: 2
 import { Link } from "/src/components/Link";
 import { AutoSnippet, When } from "/src/components/CodeSnippet";
 
+<!-- Examples can assume:
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
+
+late WidgetRef ref;
+late BuildContext context;
+late Future<void> future;
+final provider = Provider((ref) => 0);
+
+class YourNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+  void yourMethod() {}
+}
+final yourNotifierProvider = NotifierProvider<YourNotifier, int>(
+  YourNotifier.new,
+);
+
+class User {
+  User(this.name);
+  final String name;
+}
+final userProvider = Provider<User?>((ref) => null);
+-->
+
 Here are some commonly asked questions from the community:
 
 ## What is the difference between `ref.refresh` and `ref.invalidate`?
@@ -16,7 +41,7 @@ and wonder how they differ.
 It's simpler than you think: `ref.refresh` is nothing but syntax sugar for
 `invalidate` + `read`:
 
-```dart
+```dart no-analyze
 T refresh<T>(provider) {
   invalidate(provider);
   return read(provider);
@@ -140,8 +165,9 @@ mounted. This generally happens after an `await`:
 ElevatedButton(
   onPressed: () async {
     await future;
-    ref.read(...); // May throw "Using "ref" when a widget is about to or has been unmounted is unsafe."
-  }
+    ref.read(provider); // May throw "Using "ref" when a widget is about to or has been unmounted is unsafe."
+  },
+  child: const Text('Click me'),
 )
 ```
 
@@ -152,7 +178,45 @@ ElevatedButton(
   onPressed: () async {
     await future;
     if (!context.mounted) return;
-    ref.read(...); // No longer throws
-  }
+    ref.read(provider); // No longer throws
+  },
+  child: const Text('Click me'),
 )
 ```
+
+## Known caveat: a provider may recompute (and throw) one frame before its widget is removed
+
+This is a known limitation of eager recomputation, with no clean fix yet.
+
+When a provider's dependency changes, every dependent provider that still has a
+listener recomputes **immediately**, before the next frame in which the listening
+widgets would rebuild or be removed.
+
+So if the same change is also what removes the listener (logging out, or a filter
+shrinking a list), the dependent still recomputes once against the new value
+before its widget is unmounted. If that computation assumed the previous value,
+it throws:
+
+```dart
+final userNameProvider = Provider((ref) {
+  final user = ref.watch(userProvider);
+  return user!.name; // throws on logout, the frame before the screen is removed
+});
+```
+
+:::caution
+There is currently no way to skip this last recompute. Until there is, the
+recommended workaround is to make the computation total: return `null` (or a
+sentinel) for the transient state instead of throwing.
+:::
+
+```dart
+final userNameProvider = Provider((ref) {
+  final user = ref.watch(userProvider);
+  if (user == null) return null; // handles the brief invalid window
+  return user.name;
+});
+```
+
+This is noisy, but it avoids the exception. Keep `throw` for states that are
+genuinely impossible rather than merely transient.

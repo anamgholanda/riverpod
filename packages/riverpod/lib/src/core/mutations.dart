@@ -1,6 +1,33 @@
-// ignore_for_file: deprecated_member_use_from_same_package
-
 part of '../framework.dart';
+
+// Examples can assume:
+// import 'package:flutter_riverpod/flutter_riverpod.dart' show WidgetRef;
+// import 'package:material_ui/material_ui.dart';
+// import 'package:riverpod/experimental/mutation.dart';
+//
+// class Todo {
+//   Todo({required this.title});
+//   final String title;
+//   String get id => title;
+// }
+//
+// class User {
+//   String get id => '';
+// }
+//
+// class TodoList extends Notifier<List<Todo>> {
+//   @override
+//   List<Todo> build() => [];
+//   Future<void> addTodo(Todo todo) async {}
+// }
+//
+// final todoListProvider = NotifierProvider<TodoList, List<Todo>>(
+//   TodoList.new,
+// );
+// final mutation = Mutation<void>();
+// late WidgetRef ref;
+// late Todo todo;
+// late User user;
 
 /// Mutation code. This should be in riverpod_annotation, but has to be here
 /// for the sake of ProviderObserver.
@@ -12,10 +39,8 @@ const mutationZoneKey = #_mutation;
 ///
 /// Use [get] to imperatively read a provider while the mutation is pending.
 /// Providers accessed this way remain alive for the duration of the mutation.
-@Deprecated('You can now use `ref.read` directly inside `Mutation.run`')
 @publicInMutations
 final class MutationTransaction {
-  @Deprecated('You can now use `ref.read` directly inside `Mutation.run`')
   MutationTransaction._(this._container);
 
   final ProviderContainer _container;
@@ -220,7 +245,7 @@ abstract class MutationTarget {
 ///
 /// Once defined, you can use mutations using [Ref.watch] to listen to their state:
 ///
-/// ```dart
+/// ```dart continued
 /// Widget build(BuildContext context, WidgetRef ref) {
 ///   final addTodo = ref.watch(addTodoMutation);
 ///
@@ -249,17 +274,18 @@ abstract class MutationTarget {
 /// This is typically done inside a callback, such as the `onPressed`
 /// of a button:
 ///
-/// ```dart
+/// ```dart continued
 /// ElevatedButton(
 ///   onPressed: () {
-///     addTodoMutation.run(ref, () async {
+///     addTodoMutation.run(ref, (tsx) async {
 ///       // This is where you perform the side-effect. Here, you can
 ///       // read your providers to modify them.
-///       await ref.read(todoListProvider.notifier).addTodo(
+///       await tsx.get(todoListProvider.notifier).addTodo(
 ///         Todo(title: 'New Todo'),
 ///       );
 ///     });
 ///   },
+///   child: const Text('Add Todo'),
 /// );
 /// ```
 ///
@@ -299,17 +325,20 @@ abstract class MutationTarget {
 ///
 /// ```dart
 /// final deleteTodoMutation = Mutation<void>();
-/// ...
+/// // ...
 ///
 /// // You can pass a unique object to the mutation upon watching it.
-/// final deleteTodo = ref.watch(deleteMutation(todo.id));
-/// ...
+/// final deleteTodo = ref.watch(deleteTodoMutation(todo.id));
+/// // ...
 ///
-/// onPressed: () {
-///   // Upon calling `run`, you will have to pass the same key as when
-///   // watching the mutation.
-///   deleteTodo(todo.id).run(ref, () async { /* ... */ });
-/// }
+/// ElevatedButton(
+///   onPressed: () {
+///     // Upon calling `run`, you will have to pass the same key as when
+///     // watching the mutation.
+///     deleteTodoMutation(todo.id).run(ref, (tsx) async { /* ... */ });
+///   },
+///   child: const Text('Delete Todo'),
+/// );
 /// ```
 ///
 /// See also:
@@ -372,8 +401,8 @@ extension<StateT> on Mutation<StateT> {
 
 @internal
 final class MutationImpl<ResultT>
-    with
-        SyncProviderTransformerMixin<
+    extends
+        CustomProviderListenable<
           _MutationNotifier<ResultT>,
           MutationState<ResultT>
         >
@@ -387,6 +416,12 @@ final class MutationImpl<ResultT>
   // ignore: library_private_types_in_public_api, not public
   ProviderListenable<_MutationNotifier<ResultT>> get source =>
       _MutationProvider<ResultT>(this);
+
+  @override
+  // ignore: library_private_types_in_public_api, not public
+  _MutationTransformer<ResultT> createTransformer() {
+    return _MutationTransformer<ResultT>();
+  }
 
   @override
   Object? get key => _key?.$1;
@@ -437,21 +472,30 @@ final class MutationImpl<ResultT>
   @override
   void reset(MutationTarget target) {
     final container = target.container;
-    final _MutationNotifier(:state, :setState, :getRef) = container
+    final _MutationNotifier(:state, :setState, :getRef, :setRef) = container
         .read<_MutationNotifier<ResultT>>(_MutationProvider(this));
 
     final ref = getRef();
     if (ref == null) return;
 
-    setState(MutationIdle<ResultT>._(), ref);
+    // Rotate the active transaction *before* publishing the idle state.
+    // `setState` notifies listeners/observers synchronously, so a listener
+    // could start a new `run` during this call. Rotating first means that
+    // new run installs its own transaction *after* ours, and is therefore
+    // not invalidated. Any `run` that was already in-flight before the reset
+    // keeps its now-stale transaction and can no longer overwrite the state.
+    final resetRef = MutationTransaction._(container);
+    setRef(resetRef);
+    setState(MutationIdle<ResultT>._(), resetRef);
   }
 
   void _mutationStart(
     ProviderSubscription<_MutationNotifier<ResultT>> sub,
     MutationTransaction ref,
   ) {
-    final _MutationNotifier(:state, :setState, :setRef) =
-        sub.readSafe().valueOrRawException;
+    final _MutationNotifier(:state, :setState, :setRef) = sub
+        .readSafe()
+        .valueOrRawException;
 
     setRef(ref);
 
@@ -463,8 +507,13 @@ final class MutationImpl<ResultT>
     MutationTransaction ref,
     ResultT result,
   ) {
-    final _MutationNotifier(:state, :setState) =
-        sub.readSafe().valueOrRawException;
+    // The subscription may have been closed if the container/element was
+    // disposed while the mutation was still running. In that case there is
+    // no state left to update.
+    if (sub.closed) return;
+    final _MutationNotifier(:state, :setState) = sub
+        .readSafe()
+        .valueOrRawException;
 
     setState(MutationSuccess<ResultT>._(result), ref);
   }
@@ -475,30 +524,14 @@ final class MutationImpl<ResultT>
     Object error,
     StackTrace stackTrace,
   ) {
-    final _MutationNotifier(:state, :setState) =
-        sub.readSafe().valueOrRawException;
+    // See [_mutationSuccess]: the subscription may have been closed by a
+    // disposal that happened while the mutation was running.
+    if (sub.closed) return;
+    final _MutationNotifier(:state, :setState) = sub
+        .readSafe()
+        .valueOrRawException;
 
     setState(MutationError<ResultT>._(error, stackTrace), ref);
-  }
-
-  @internal
-  @override
-  // ignore: library_private_types_in_public_api, not public
-  ProviderTransformer<_MutationNotifier<ResultT>, MutationState<ResultT>>
-  transform(
-    ProviderTransformerContext<
-      // ignore: library_private_types_in_public_api, not public
-      _MutationNotifier<ResultT>,
-      MutationState<ResultT>
-    >
-    context,
-  ) {
-    return ProviderTransformer(
-      initState: (self) => context.sourceState.requireValue.state,
-      listener: (self, prev, next) {
-        self.state = AsyncResult.guard(() => next.requireValue.state);
-      },
-    );
   }
 
   bool _matchesT(Mutation<Object?> other) => other is Mutation<ResultT>;
@@ -527,6 +560,25 @@ final class MutationImpl<ResultT>
     ], ', ');
     buffer.write(')');
     return buffer.toString();
+  }
+}
+
+final class _MutationTransformer<ResultT>
+    extends
+        SyncProviderTransformer2<
+          _MutationNotifier<ResultT>,
+          MutationState<ResultT>,
+          MutationImpl<ResultT>
+        > {
+  @override
+  MutationState<ResultT> initState() => sourceState.requireValue.state;
+
+  @override
+  void onEvent(
+    AsyncResult<_MutationNotifier<ResultT>> prev,
+    AsyncResult<_MutationNotifier<ResultT>> next,
+  ) {
+    state = AsyncResult.guard(() => next.requireValue.state);
   }
 }
 

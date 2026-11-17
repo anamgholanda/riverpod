@@ -19,7 +19,7 @@ jobs:
   sonarcloud:
     name: Análise SonarCloud
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -33,37 +33,83 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Ferramenta de cobertura para pacotes Dart
-        run: dart pub global activate coverage
+      - name: Ferramentas globais (coverage)
+        run: |
+          dart pub global activate coverage
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
 
+      # Passo 1: resolve as dependências de TODOS os pacotes, tenham testes ou não.
+      # Isso gera o .dart_tool/package_config.json que o analisador do Sonar usa
+      # para resolver imports (a falta dele causa muitos dart:S2260).
+      - name: Resolver dependências (todos os pacotes)
+        run: |
+          set -uo pipefail
+
+          # Se o repositório for um pub workspace, o `pub get` na raiz resolve todos os membros.
+          if [ -f pubspec.yaml ] && grep -q "^workspace:" pubspec.yaml; then
+            echo "::group::raiz (workspace)"
+            flutter pub get || echo "::warning::Falha no pub get da raiz"
+            echo "::endgroup::"
+          fi
+
+          # Em seguida, cada pubspec individualmente (cobre repos sem workspace
+          # e pacotes fora do workspace, como exemplos).
+          failed=0
+          while IFS= read -r pubspec; do
+            pkg="$(dirname "$pubspec")"
+            echo "::group::pub get $pkg"
+            # `flutter pub get` também funciona em pacotes Dart puros
+            (cd "$pkg" && flutter pub get) || {
+              echo "::warning::Falha no pub get de $pkg"
+              failed=$((failed + 1))
+            }
+            echo "::endgroup::"
+          done < <(find . -name pubspec.yaml \
+                     -not -path "*/.dart_tool/*" \
+                     -not -path "*/build/*" \
+                     -not -path "*/node_modules/*" \
+                     -not -path "./.git/*" | sort)
+
+          echo "Pacotes com falha no pub get: $failed"
+
+      # Passo 2: gera código (.g.dart, .freezed.dart etc.) onde houver build_runner,
+      # para que `part` e símbolos gerados existam durante a análise e os testes.
+      - name: Gerar código (build_runner)
+        run: |
+          set -uo pipefail
+          while IFS= read -r pubspec; do
+            pkg="$(dirname "$pubspec")"
+            grep -q "build_runner" "$pubspec" || continue
+            echo "::group::build_runner $pkg"
+            (cd "$pkg" && dart run build_runner build --delete-conflicting-outputs) \
+              || echo "::warning::Falha no build_runner de $pkg"
+            echo "::endgroup::"
+          done < <(find packages -name pubspec.yaml \
+                     -not -path "*/.dart_tool/*" \
+                     -not -path "*/build/*" | sort)
+
+      # Passo 3: testes com cobertura, consolidando tudo em coverage/lcov.info na raiz.
       - name: Testes com cobertura (todos os pacotes)
         run: |
           set -uo pipefail
-          export PATH="$PATH:$HOME/.pub-cache/bin"
           mkdir -p coverage
           : > coverage/lcov.info
 
-          # Pacotes em packages/, ignorando exemplos e artefatos de build
           while IFS= read -r pubspec; do
             pkg="$(dirname "$pubspec")"
             [ -d "$pkg/test" ] || continue
 
-            echo "::group::$pkg"
+            echo "::group::testes $pkg"
             (
               cd "$pkg"
               if grep -q "sdk: flutter" pubspec.yaml; then
-                flutter pub get
                 flutter test --coverage
               else
-                dart pub get
-                dart test --coverage=coverage
-                dart pub global run coverage:format_coverage \
-                  --lcov --in=coverage --out=coverage/lcov.info \
-                  --report-on=lib --packages=.dart_tool/package_config.json
+                dart pub global run coverage:test_with_coverage
               fi
             ) || echo "::warning::Falha nos testes de $pkg"
 
-            # Caminhos (SF:) relativos à raiz do repositório
+            # Reescreve os caminhos (SF:) para serem relativos à raiz do repositório
             if [ -f "$pkg/coverage/lcov.info" ]; then
               sed "s|^SF:|SF:${pkg#./}/|" "$pkg/coverage/lcov.info" >> coverage/lcov.info
             fi
